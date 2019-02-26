@@ -86,11 +86,11 @@ public class MatrixVariableMapMethodArgumentResolver implements HandlerMethodArg
 		}
 		else {
 			for (MultiValueMap<String, String> vars : matrixVariables.values()) {
-				for (String name : vars.keySet()) {
-					for (String value : vars.get(name)) {
+				vars.forEach((name, values) -> {
+					for (String value : values) {
 						map.add(name, value);
 					}
-				}
+				});
 			}
 		}
 
@@ -101,8 +101,7 @@ public class MatrixVariableMapMethodArgumentResolver implements HandlerMethodArg
 		if (!MultiValueMap.class.isAssignableFrom(parameter.getParameterType())) {
 			ResolvableType[] genericTypes = ResolvableType.forMethodParameter(parameter).getGenerics();
 			if (genericTypes.length == 2) {
-				Class<?> declaredClass = genericTypes[1].getRawClass();
-				return (declaredClass == null || !List.class.isAssignableFrom(declaredClass));
+				return !List.class.isAssignableFrom(genericTypes[1].toClass());
 			}
 		}
 		return false;

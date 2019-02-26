@@ -20,13 +20,23 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import org.hamcrest.Matcher;
-import org.junit.BeforeClass;
+import org.hamcrest.collection.IsIterableContainingInOrder;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.InOrder;
+
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanClassLoaderAware;
 import org.springframework.beans.factory.BeanFactory;
@@ -39,15 +49,20 @@ import org.springframework.core.annotation.Order;
 import org.springframework.core.env.Environment;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.core.type.AnnotationMetadata;
+import org.springframework.lang.Nullable;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 
-import static org.hamcrest.CoreMatchers.*;
+import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
+import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.*;
 
 /**
  * Tests for {@link ImportSelector} and {@link DeferredImportSelector}.
  *
  * @author Phillip Webb
+ * @author Stephane Nicoll
  */
 @SuppressWarnings("resource")
 public class ImportSelectorTests {
@@ -55,9 +70,11 @@ public class ImportSelectorTests {
 	static Map<Class<?>, String> importFrom = new HashMap<>();
 
 
-	@BeforeClass
-	public static void clearImportFrom() {
+	@Before
+	public void cleanup() {
 		ImportSelectorTests.importFrom.clear();
+		SampleImportSelector.cleanup();
+		TestImportGroup.cleanup();
 	}
 
 
@@ -94,6 +111,89 @@ public class ImportSelectorTests {
 		assertThat(importFrom.get(DeferredImportSelector2.class), isFromIndirect);
 	}
 
+	@Test
+	public void importSelectorsWithGroup() {
+		DefaultListableBeanFactory beanFactory = spy(new DefaultListableBeanFactory());
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(beanFactory);
+		context.register(GroupedConfig.class);
+		context.refresh();
+		InOrder ordered = inOrder(beanFactory);
+		ordered.verify(beanFactory).registerBeanDefinition(eq("a"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("b"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("c"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("d"), any());
+		assertThat(TestImportGroup.instancesCount.get(), equalTo(1));
+		assertThat(TestImportGroup.imports.size(), equalTo(1));
+		assertThat(TestImportGroup.imports.values().iterator().next().size(), equalTo(2));
+	}
+
+	@Test
+	public void importSelectorsSeparateWithGroup() {
+		DefaultListableBeanFactory beanFactory = spy(new DefaultListableBeanFactory());
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(beanFactory);
+		context.register(GroupedConfig1.class);
+		context.register(GroupedConfig2.class);
+		context.refresh();
+		InOrder ordered = inOrder(beanFactory);
+		ordered.verify(beanFactory).registerBeanDefinition(eq("c"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("d"), any());
+		assertThat(TestImportGroup.instancesCount.get(), equalTo(1));
+		assertThat(TestImportGroup.imports.size(), equalTo(2));
+		Iterator<AnnotationMetadata> iterator = TestImportGroup.imports.keySet().iterator();
+		assertThat(iterator.next().getClassName(), equalTo(GroupedConfig2.class.getName()));
+		assertThat(iterator.next().getClassName(), equalTo(GroupedConfig1.class.getName()));
+	}
+
+	@Test
+	public void importSelectorsWithNestedGroup() {
+		DefaultListableBeanFactory beanFactory = spy(new DefaultListableBeanFactory());
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(beanFactory);
+		context.register(ParentConfiguration1.class);
+		context.refresh();
+		InOrder ordered = inOrder(beanFactory);
+		ordered.verify(beanFactory).registerBeanDefinition(eq("a"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("e"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("c"), any());
+		assertThat(TestImportGroup.instancesCount.get(), equalTo(2));
+ 		assertThat(TestImportGroup.imports.size(), equalTo(2));
+		assertThat(TestImportGroup.allImports(), hasEntry(
+				is(ParentConfiguration1.class.getName()),
+				IsIterableContainingInOrder.contains(DeferredImportSelector1.class.getName(),
+						ChildConfiguration1.class.getName())));
+		assertThat(TestImportGroup.allImports(), hasEntry(
+				is(ChildConfiguration1.class.getName()),
+				IsIterableContainingInOrder.contains(DeferredImportedSelector3.class.getName())));
+	}
+
+	@Test
+	public void importSelectorsWithNestedGroupSameDeferredImport() {
+		DefaultListableBeanFactory beanFactory = spy(new DefaultListableBeanFactory());
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(beanFactory);
+		context.register(ParentConfiguration2.class);
+		context.refresh();
+		InOrder ordered = inOrder(beanFactory);
+		ordered.verify(beanFactory).registerBeanDefinition(eq("b"), any());
+		ordered.verify(beanFactory).registerBeanDefinition(eq("d"), any());
+		assertThat(TestImportGroup.instancesCount.get(), equalTo(2));
+		assertThat(TestImportGroup.allImports().size(), equalTo(2));
+		assertThat(TestImportGroup.allImports(), hasEntry(
+				is(ParentConfiguration2.class.getName()),
+				IsIterableContainingInOrder.contains(DeferredImportSelector2.class.getName(),
+						ChildConfiguration2.class.getName())));
+		assertThat(TestImportGroup.allImports(), hasEntry(
+				is(ChildConfiguration2.class.getName()),
+				IsIterableContainingInOrder.contains(DeferredImportSelector2.class.getName())));
+	}
+
+	@Test
+	public void invokeAwareMethodsInImportGroup() {
+		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(GroupedConfig1.class);
+		assertThat(TestImportGroup.beanFactory, is(context.getBeanFactory()));
+		assertThat(TestImportGroup.classLoader, is(context.getBeanFactory().getBeanClassLoader()));
+		assertThat(TestImportGroup.resourceLoader, is(notNullValue()));
+		assertThat(TestImportGroup.environment, is(context.getEnvironment()));
+	}
+
 
 	@Configuration
 	@Import(SampleImportSelector.class)
@@ -108,6 +208,13 @@ public class ImportSelectorTests {
 		static ResourceLoader resourceLoader;
 		static BeanFactory beanFactory;
 		static Environment environment;
+
+		static void cleanup() {
+			SampleImportSelector.classLoader = null;
+			SampleImportSelector.beanFactory = null;
+			SampleImportSelector.resourceLoader = null;
+			SampleImportSelector.environment = null;
+		}
 
 		@Override
 		public void setBeanClassLoader(ClassLoader classLoader) {
@@ -235,6 +342,15 @@ public class ImportSelectorTests {
 		}
 	}
 
+	@Configuration
+	public static class DeferredImportedSelector3 {
+
+		@Bean
+		public String e() {
+			return "e";
+		}
+	}
+
 
 	@Configuration
 	@Import(IndirectImportSelector.class)
@@ -253,6 +369,207 @@ public class ImportSelectorTests {
 
 	@Sample
 	public static class IndirectImport {
+	}
+
+
+	@GroupedSample
+	@Configuration
+	static class GroupedConfig {
+	}
+
+
+	@Target(ElementType.TYPE)
+	@Retention(RetentionPolicy.RUNTIME)
+	@Import({GroupedDeferredImportSelector1.class, GroupedDeferredImportSelector2.class, ImportSelector1.class, ImportSelector2.class})
+	public @interface GroupedSample {
+	}
+
+	@Configuration
+	@Import(GroupedDeferredImportSelector1.class)
+	static class GroupedConfig1 {
+	}
+
+	@Configuration
+	@Import(GroupedDeferredImportSelector2.class)
+	static class GroupedConfig2 {
+	}
+
+
+	public static class GroupedDeferredImportSelector1 extends DeferredImportSelector1 {
+
+		@Nullable
+		@Override
+		public Class<? extends Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+	}
+
+	public static class GroupedDeferredImportSelector2 extends DeferredImportSelector2 {
+
+		@Nullable
+		@Override
+		public Class<? extends Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+	}
+
+
+	@Configuration
+	@Import({ImportSelector1.class, ParentDeferredImportSelector1.class})
+	public static class ParentConfiguration1 {
+	}
+
+
+	public static class ParentDeferredImportSelector1 implements DeferredImportSelector {
+
+		@Override
+		public String[] selectImports(AnnotationMetadata importingClassMetadata) {
+			ImportSelectorTests.importFrom.put(getClass(), importingClassMetadata.getClassName());
+			return new String[] { DeferredImportSelector1.class.getName(), ChildConfiguration1.class.getName() };
+		}
+
+		@Nullable
+		@Override
+		public Class<? extends DeferredImportSelector.Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+
+	}
+
+	@Configuration
+	@Import({ImportSelector2.class, ParentDeferredImportSelector2.class})
+	public static class ParentConfiguration2 {
+	}
+
+	public static class ParentDeferredImportSelector2 implements DeferredImportSelector {
+
+		@Override
+		public String[] selectImports(AnnotationMetadata importingClassMetadata) {
+			ImportSelectorTests.importFrom.put(getClass(), importingClassMetadata.getClassName());
+			return new String[] { DeferredImportSelector2.class.getName(), ChildConfiguration2.class.getName() };
+		}
+
+		@Nullable
+		@Override
+		public Class<? extends DeferredImportSelector.Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+
+	}
+
+	@Configuration
+	@Import(ChildDeferredImportSelector1.class)
+	public static class ChildConfiguration1 {
+
+	}
+
+
+	public static class ChildDeferredImportSelector1 implements DeferredImportSelector {
+
+		@Override
+		public String[] selectImports(AnnotationMetadata importingClassMetadata) {
+			ImportSelectorTests.importFrom.put(getClass(), importingClassMetadata.getClassName());
+			return new String[] { DeferredImportedSelector3.class.getName() };
+		}
+
+		@Nullable
+		@Override
+		public Class<? extends DeferredImportSelector.Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+
+	}
+
+	@Configuration
+	@Import(ChildDeferredImportSelector2.class)
+	public static class ChildConfiguration2 {
+
+	}
+
+	public static class ChildDeferredImportSelector2 implements DeferredImportSelector {
+
+		@Override
+		public String[] selectImports(AnnotationMetadata importingClassMetadata) {
+			ImportSelectorTests.importFrom.put(getClass(), importingClassMetadata.getClassName());
+			return new String[] { DeferredImportSelector2.class.getName() };
+		}
+
+		@Nullable
+		@Override
+		public Class<? extends DeferredImportSelector.Group> getImportGroup() {
+			return TestImportGroup.class;
+		}
+
+	}
+
+
+	public static class TestImportGroup implements DeferredImportSelector.Group,
+			BeanClassLoaderAware, ResourceLoaderAware, BeanFactoryAware, EnvironmentAware {
+
+		static ClassLoader classLoader;
+		static ResourceLoader resourceLoader;
+		static BeanFactory beanFactory;
+		static Environment environment;
+
+		static AtomicInteger instancesCount = new AtomicInteger();
+		static MultiValueMap<AnnotationMetadata, String> imports = new LinkedMultiValueMap<>();
+
+		public TestImportGroup() {
+			TestImportGroup.instancesCount.incrementAndGet();
+		}
+
+		static void cleanup() {
+			TestImportGroup.classLoader = null;
+			TestImportGroup.beanFactory = null;
+			TestImportGroup.resourceLoader = null;
+			TestImportGroup.environment = null;
+			TestImportGroup.instancesCount = new AtomicInteger();
+			TestImportGroup.imports.clear();
+		}
+
+		static Map<String, List<String>> allImports() {
+			return TestImportGroup.imports.entrySet()
+					.stream()
+					.collect(Collectors.toMap((entry) -> entry.getKey().getClassName(),
+							Map.Entry::getValue));
+		}
+		private final List<Entry> instanceImports = new ArrayList<>();
+
+		@Override
+		public void process(AnnotationMetadata metadata, DeferredImportSelector selector) {
+			for (String importClassName : selector.selectImports(metadata)) {
+				this.instanceImports.add(new Entry(metadata, importClassName));
+			}
+			TestImportGroup.imports.addAll(metadata,
+					Arrays.asList(selector.selectImports(metadata)));
+		}
+
+		@Override
+		public Iterable<Entry> selectImports() {
+			LinkedList<Entry> content = new LinkedList<>(this.instanceImports);
+			Collections.reverse(content);
+			return content;
+		}
+
+		@Override
+		public void setBeanClassLoader(ClassLoader classLoader) {
+			TestImportGroup.classLoader = classLoader;
+		}
+
+		@Override
+		public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
+			TestImportGroup.beanFactory = beanFactory;
+		}
+
+		@Override
+		public void setResourceLoader(ResourceLoader resourceLoader) {
+			TestImportGroup.resourceLoader = resourceLoader;
+		}
+
+		@Override
+		public void setEnvironment(Environment environment) {
+			TestImportGroup.environment = environment;
+		}
 	}
 
 }
